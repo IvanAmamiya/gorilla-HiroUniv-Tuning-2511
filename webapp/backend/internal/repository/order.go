@@ -92,7 +92,7 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 	// ステップ2: ソートフィールドを決定
 	sortField := "o.order_id"
 	switch req.SortField {
-	case "name", "product_name":
+	case "product_name":
 		sortField = "p.name"
 	case "created_at":
 		sortField = "o.created_at"
@@ -130,11 +130,14 @@ func (r *OrderRepository) ListOrders(ctx context.Context, userID int, req model.
 		}
 	}
 
-	// order_id 作為第二排序條件，但方向需與主要排序一致以穩定輸出
 	if sortField == "o.order_id" {
 		query += " ORDER BY " + sortField + " " + sortOrder
 	} else {
-		query += " ORDER BY " + sortField + " " + sortOrder + ", o.order_id " + sortOrder
+		secondaryOrder := "ASC"
+		if sortField == "p.name" {
+			secondaryOrder = sortOrder
+		}
+		query += " ORDER BY " + sortField + " " + sortOrder + ", o.order_id " + secondaryOrder
 	}
 	query += " LIMIT ? OFFSET ?"
 	queryArgs = append(queryArgs, req.PageSize, req.Offset)
