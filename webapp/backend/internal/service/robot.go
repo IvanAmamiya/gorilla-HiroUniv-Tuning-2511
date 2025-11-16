@@ -6,6 +6,7 @@ import (
 	"backend/internal/service/utils"
 	"context"
 	"log"
+	"sort"
 )
 
 type RobotService struct {
@@ -58,17 +59,66 @@ func (s *RobotService) UpdateOrderStatus(ctx context.Context, orderID int64, new
 }
 
 func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID string, robotCapacity int) (model.DeliveryPlan, error) {
-	n := len(orders)
+	if robotCapacity <= 0 || len(orders) == 0 {
+		return model.DeliveryPlan{RobotID: robotID}, nil
+	}
+
+	candidates := append([]model.Order(nil), orders...)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		wi, wj := candidates[i].Weight, candidates[j].Weight
+		vi, vj := candidates[i].Value, candidates[j].Value
+		if wi == 0 && wj == 0 {
+			return vi > vj
+		}
+		if wi == 0 {
+			return true
+		}
+		if wj == 0 {
+			return false
+		}
+		return vi*wj > vj*wi
+	})
+
 	bestValue := 0
 	var bestSet []model.Order
+	if val, set := greedySeedPlan(candidates, robotCapacity); val > 0 {
+		bestValue = val
+		bestSet = set
+	}
+
 	steps := 0
 	checkEvery := 16384
+
+	fractionalBound := func(idx, curWeight int) float64 {
+		if curWeight >= robotCapacity {
+			return 0
+		}
+		remaining := robotCapacity - curWeight
+		bound := 0.0
+		for j := idx; j < len(candidates) && remaining >= 0; j++ {
+			order := candidates[j]
+			if order.Weight <= 0 {
+				bound += float64(order.Value)
+				continue
+			}
+			if order.Weight <= remaining {
+				remaining -= order.Weight
+				bound += float64(order.Value)
+			} else {
+				frac := float64(order.Value) * float64(remaining) / float64(order.Weight)
+				bound += frac
+				break
+			}
+		}
+		return bound
+	}
 
 	var dfs func(i, curWeight, curValue int, curSet []model.Order) bool
 	dfs = func(i, curWeight, curValue int, curSet []model.Order) bool {
 		if curWeight > robotCapacity {
 			return false
 		}
+
 		steps++
 		if checkEvery > 0 && steps%checkEvery == 0 {
 			select {
@@ -77,20 +127,27 @@ func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID 
 			default:
 			}
 		}
-		if i == n {
-			if curValue > bestValue {
-				bestValue = curValue
-				bestSet = append([]model.Order{}, curSet...)
-			}
+
+		if float64(curValue)+fractionalBound(i, curWeight) <= float64(bestValue) {
 			return false
 		}
 
-		if dfs(i+1, curWeight, curValue, curSet) {
+		if curValue > bestValue {
+			bestValue = curValue
+			bestSet = append([]model.Order(nil), curSet...)
+		}
+
+		if i == len(candidates) {
+			return false
+		}
+
+		order := candidates[i]
+
+		if dfs(i+1, curWeight+order.Weight, curValue+order.Value, append(curSet, order)) {
 			return true
 		}
 
-		order := orders[i]
-		return dfs(i+1, curWeight+order.Weight, curValue+order.Value, append(curSet, order))
+		return dfs(i+1, curWeight, curValue, curSet)
 	}
 
 	canceled := dfs(0, 0, 0, nil)
@@ -109,4 +166,23 @@ func selectOrdersForDelivery(ctx context.Context, orders []model.Order, robotID 
 		TotalValue:  bestValue,
 		Orders:      bestSet,
 	}, nil
+}
+
+func greedySeedPlan(orders []model.Order, capacity int) (int, []model.Order) {
+	remaining := capacity
+	value := 0
+	selected := make([]model.Order, 0, len(orders))
+	for _, o := range orders {
+		if o.Weight <= 0 {
+			value += o.Value
+			selected = append(selected, o)
+			continue
+		}
+		if o.Weight <= remaining {
+			remaining -= o.Weight
+			value += o.Value
+			selected = append(selected, o)
+		}
+	}
+	return value, append([]model.Order(nil), selected...)
 }
